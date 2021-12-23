@@ -479,4 +479,10 @@ defmodule InstrumentationTest do
     assert header_span_id == span["spanId"]
     assert status == 200
   end
+
+  test "auth_request should not crash the worker thread", %{trace_file: trace_file} do
+    %HTTPoison.Response{status_code: status} = HTTPoison.get!("#{@host}/subrequest")
+
+    assert status == 200
+  end
 end
