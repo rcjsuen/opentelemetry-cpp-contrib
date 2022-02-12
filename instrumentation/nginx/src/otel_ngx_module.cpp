@@ -170,21 +170,43 @@ static ngx_http_variable_t otel_ngx_variables[] = {
   ngx_http_null_variable,
 };
 
-TraceContext* GetTraceContext(ngx_http_request_t* req) {
-  ngx_http_variable_value_t* val = ngx_http_get_indexed_variable(req, otel_ngx_variables[0].index);
+void TraceContextCleanup(void* data) {
+  TraceContext* context = (TraceContext*)data;
+  context->~TraceContext();
+}
 
-  if (val == nullptr || val->not_found) {
-    ngx_log_error(NGX_LOG_ERR, req->connection->log, 0, "TraceContext not found");
-    return nullptr;
+ngx_pool_cleanup_t *FindTraceContextCleanup(ngx_http_request_t *req) {
+  for (auto cleanup = req->pool->cleanup; cleanup;
+       cleanup = cleanup->next) {
+    if (cleanup->handler == TraceContextCleanup) {
+      return cleanup;
+    }
+  }
+  return nullptr;
+}
+
+TraceContext* GetTraceContext(ngx_http_request_t* req) {
+  auto context = static_cast<TraceContext *>(
+      ngx_http_get_module_ctx(req, otel_ngx_module));
+  if (context != nullptr || !req->internal) {
+    return context;
   }
 
-  std::unordered_map<ngx_http_request_t*, TraceContext*>* map = (std::unordered_map<ngx_http_request_t*, TraceContext*>*)val->data;
-auto it = map->find(req);
-if (it != map->end()) {
-  return it->second;
-}
-ngx_log_error(NGX_LOG_ERR, req->connection->log, 0, "TraceContext not found");
-return nullptr;
+  // // If this is an internal redirect, the OpenTracingContext will have been
+  // // reset, but we can still recover it from the cleanup handler.
+  // //
+  // // See set_opentracing_context below.
+  auto cleanup = FindTraceContextCleanup(req);
+  if (cleanup != nullptr) {
+    context = static_cast<TraceContext *>(cleanup->data);
+  }
+
+  // // If we found a context, attach with ngx_http_set_ctx so that we don't have
+  // // to loop through the cleanup handlers again.
+  if (context != nullptr) {
+    ngx_http_set_ctx(req, static_cast<void *>(context), otel_ngx_module);
+  }
+  return context;
 }
 
 nostd::string_view WithoutOtelVarPrefix(ngx_str_t value) {
@@ -329,11 +351,6 @@ OtelGetSpanId(ngx_http_request_t* req, ngx_http_variable_value_t* v, uintptr_t d
   return NGX_OK;
 }
 
-void TraceContextCleanup(void* data) {
-  TraceContext* context = (TraceContext*)data;
-  context->~TraceContext();
-}
-
 void RequestContextMapCleanup(void* data) {
   std::unordered_map<ngx_http_request_t*, TraceContext*>* map = (std::unordered_map<ngx_http_request_t*, TraceContext*>*)data;
   map->~unordered_map();
@@ -381,25 +398,12 @@ static bool IsOtelEnabled(ngx_http_request_t* req) {
   }
 }
 
-TraceContext* CreateTraceContext(ngx_http_request_t* req, ngx_http_variable_value_t* val) {
+TraceContext* CreateTraceContext(ngx_http_request_t* req) {
   ngx_pool_cleanup_t* cleanup = ngx_pool_cleanup_add(req->pool, sizeof(TraceContext));
   TraceContext* context = (TraceContext*)cleanup->data;
   new (context) TraceContext(req);
   cleanup->handler = TraceContextCleanup;
-
-  std::unordered_map<ngx_http_request_t*, TraceContext*>* map;
-  if (req->parent) {
-    // Subrequests will already have the map created so just retrieve it
-    map = (std::unordered_map<ngx_http_request_t*, TraceContext*>*)val->data;
-  } else {
-    ngx_pool_cleanup_t* cleanup = ngx_pool_cleanup_add(req->pool, sizeof(std::unordered_map<ngx_http_request_t*, TraceContext*>));
-    map = (std::unordered_map<ngx_http_request_t*, TraceContext*>*)cleanup->data;
-    new (map) std::unordered_map<ngx_http_request_t*, TraceContext*>();
-    cleanup->handler = RequestContextMapCleanup;
-    val->data = (unsigned char*)cleanup->data;
-    val->len = sizeof(std::unordered_map<ngx_http_request_t*, TraceContext*>);
-  }
-  map->insert({req, context});
+  ngx_http_set_ctx(req, static_cast<void *>(context), otel_ngx_module);
   return context;
 }
 
@@ -408,14 +412,7 @@ ngx_int_t StartNgxSpan(ngx_http_request_t* req) {
     return NGX_DECLINED;
   }
 
-  ngx_http_variable_value_t* val = ngx_http_get_indexed_variable(req, otel_ngx_variables[0].index);
-
-  if (!val) {
-    ngx_log_error(NGX_LOG_ERR, req->connection->log, 0, "Unable to find OpenTelemetry context");
-    return NGX_DECLINED;
-  }
-
-  TraceContext* context = CreateTraceContext(req, val);
+  TraceContext* context = CreateTraceContext(req);
 
   OtelCarrier carrier{req, context};
   opentelemetry::context::Context incomingContext;
