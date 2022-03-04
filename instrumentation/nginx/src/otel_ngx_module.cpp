@@ -560,7 +560,7 @@ static ngx_int_t InitModule(ngx_conf_t* conf) {
   };
 
   const PhaseHandler handlers[] = {
-    {NGX_HTTP_REWRITE_PHASE, StartNgxSpan},
+    {NGX_HTTP_POST_READ_PHASE, StartNgxSpan},
     {NGX_HTTP_LOG_PHASE, FinishNgxSpan},
   };
 

@@ -490,4 +490,13 @@ defmodule InstrumentationTest do
     assert header_span_id == span["spanId"]
     assert status == 200
   end
+
+  test "location with internal redirect", %{trace_file: trace_file} do
+   %HTTPoison.Response{status_code: status} = HTTPoison.get!("#{@host}/internal")
+
+   [trace] = read_traces(trace_file, 1)
+   [span] = collect_spans(trace)
+
+   assert status == 200
+ end
 end
